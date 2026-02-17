@@ -35,31 +35,37 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const router = useRouter()
   const supabase = createClient()
 
+  // Set up real-time subscription
   useEffect(() => {
     const channel = supabase
       .channel(`bookmarks-${user.id}`)
       .on(
         'postgres_changes',
         {
-          event: '*',
+          event: 'INSERT',
           schema: 'public',
           table: 'bookmarks',
         },
         (payload) => {
-          if (payload.eventType === 'INSERT') {
-            const newBookmark = payload.new as Bookmark
-    
-            if (newBookmark.user_id !== user.id) return
-            setBookmarks((prev) => {
-              if (prev.some((b) => b.id === newBookmark.id)) return prev
-              return [newBookmark, ...prev]
-            })
-          }
-
-          if (payload.eventType === 'DELETE') {
-            const deleted = payload.old as { id: string }
-            setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
-          }
+          const newBookmark = payload.new as Bookmark
+          // RLS already ensures we only receive our own rows.
+          // The duplicate check prevents double-adding in the tab that submitted the form.
+          setBookmarks((prev) => {
+            if (prev.some((b) => b.id === newBookmark.id)) return prev
+            return [newBookmark, ...prev]
+          })
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'bookmarks',
+        },
+        (payload) => {
+          const deleted = payload.old as { id: string }
+          setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
         }
       )
       .subscribe((status) => {
@@ -70,7 +76,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [user.id])
+  }, [user.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
@@ -202,6 +208,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
         </div>
       </header>
 
+      {/* Main content */}
       <main className="max-w-3xl mx-auto px-4 py-8">
         {/* Page title + stats */}
         <div className="mb-8 animate-fade-in-up" style={{ animationDelay: '0.05s', opacity: 0 }}>
@@ -218,7 +225,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </p>
         </div>
 
-
+        {/* Search + Add bar */}
         <div
           className="flex gap-3 mb-6 animate-fade-in-up"
           style={{ animationDelay: '0.1s', opacity: 0 }}
@@ -260,6 +267,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </button>
         </div>
 
+        {/* Add form (slide in/out) */}
         {showForm && (
           <div className="mb-6 animate-slide-down">
             <AddBookmarkForm
@@ -280,7 +288,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
               <>
                 <div className="text-4xl mb-3">🔍</div>
                 <p className="text-base font-medium" style={{ color: 'var(--color-ink)' }}>
-                  No results for "{searchQuery}"
+                  No results for &quot;{searchQuery}&quot;
                 </p>
                 <p className="text-sm mt-1">Try a different search term</p>
               </>
@@ -291,7 +299,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
                   Nothing saved yet
                 </p>
                 <p className="text-sm">
-                  Click "Add Bookmark" to save your first link
+                  Click &quot;Add Bookmark&quot; to save your first link
                 </p>
               </>
             )}

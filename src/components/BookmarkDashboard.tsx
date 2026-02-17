@@ -34,52 +34,66 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const [searchQuery, setSearchQuery] = useState('')
   const router = useRouter()
 
-  // Set up real-time subscription
-  useEffect(() => {
-    const supabase = createClient()
+ useEffect(() => {
+  const supabase = createClient()
 
-    const channel = supabase
-      .channel(`bookmarks-channel-${user.id}-${Math.random()}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'bookmarks',
-        },
-        (payload) => {
-          console.log('[Realtime] INSERT received:', payload.new)
-          const newBookmark = payload.new as Bookmark
-          setBookmarks((prev) => {
-            const isDuplicate = prev.some((b) => b.id === newBookmark.id)
-            console.log('[Realtime] isDuplicate:', isDuplicate, 'bookmark id:', newBookmark.id)
-            if (isDuplicate) return prev
-            return [newBookmark, ...prev]
-          })
+  const channel = supabase
+    .channel(`bookmarks-${user.id}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'bookmarks',
+      },
+      async (payload) => {
+        console.log('[Realtime] INSERT received:', payload.new)
+        // If payload.new is empty, re-fetch from DB
+        if (!payload.new || !payload.new.id) {
+          const { data } = await supabase
+            .from('bookmarks')
+            .select('*')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single()
+          if (data) {
+            setBookmarks((prev) => {
+              if (prev.some((b) => b.id === data.id)) return prev
+              return [data, ...prev]
+            })
+          }
+          return
         }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'bookmarks',
-        },
-        (payload) => {
-          console.log('[Realtime] DELETE received:', payload.old)
-          const deleted = payload.old as { id: string }
-          setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
-        }
-      )
-      .subscribe((status, err) => {
-        console.log('[Realtime] Status:', status, err ?? '')
-        setIsConnected(status === 'SUBSCRIBED')
-      })
+        const newBookmark = payload.new as Bookmark
+        setBookmarks((prev) => {
+          if (prev.some((b) => b.id === newBookmark.id)) return prev
+          return [newBookmark, ...prev]
+        })
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'bookmarks',
+      },
+      (payload) => {
+        console.log('[Realtime] DELETE received:', payload.old)
+        const deleted = payload.old as { id: string }
+        setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
+      }
+    )
+    .subscribe((status, err) => {
+      console.log('[Realtime] Status:', status, err ?? '')
+      setIsConnected(status === 'SUBSCRIBED')
+    })
 
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [user.id])
+  return () => {
+    supabase.removeChannel(channel)
+  }
+}, [user.id])
 
   const handleSignOut = async () => {
     const supabase = createClient()

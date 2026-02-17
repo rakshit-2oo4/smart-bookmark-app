@@ -33,12 +33,13 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const [showForm, setShowForm] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const router = useRouter()
-  const supabase = createClient()
 
   // Set up real-time subscription
   useEffect(() => {
+    const supabase = createClient()
+
     const channel = supabase
-      .channel(`bookmarks-${user.id}`)
+      .channel(`bookmarks-channel-${user.id}-${Math.random()}`)
       .on(
         'postgres_changes',
         {
@@ -47,11 +48,12 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           table: 'bookmarks',
         },
         (payload) => {
+          console.log('[Realtime] INSERT received:', payload.new)
           const newBookmark = payload.new as Bookmark
-          // RLS already ensures we only receive our own rows.
-          // The duplicate check prevents double-adding in the tab that submitted the form.
           setBookmarks((prev) => {
-            if (prev.some((b) => b.id === newBookmark.id)) return prev
+            const isDuplicate = prev.some((b) => b.id === newBookmark.id)
+            console.log('[Realtime] isDuplicate:', isDuplicate, 'bookmark id:', newBookmark.id)
+            if (isDuplicate) return prev
             return [newBookmark, ...prev]
           })
         }
@@ -64,27 +66,30 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           table: 'bookmarks',
         },
         (payload) => {
+          console.log('[Realtime] DELETE received:', payload.old)
           const deleted = payload.old as { id: string }
           setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
         }
       )
-      .subscribe((status) => {
-        console.log('Realtime status:', status)
+      .subscribe((status, err) => {
+        console.log('[Realtime] Status:', status, err ?? '')
         setIsConnected(status === 'SUBSCRIBED')
       })
 
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [user.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user.id])
 
   const handleSignOut = async () => {
+    const supabase = createClient()
     await supabase.auth.signOut()
     router.push('/login')
     router.refresh()
   }
 
   const handleDelete = async (id: string) => {
+    const supabase = createClient()
     setDeletingId(id)
     const { error } = await supabase
       .from('bookmarks')
@@ -99,6 +104,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   }
 
   const handleAddBookmark = useCallback((bookmark: Bookmark) => {
+    console.log('[Form] handleAddBookmark called with:', bookmark.id)
     setBookmarks((prev) => {
       if (prev.some((b) => b.id === bookmark.id)) return prev
       return [bookmark, ...prev]

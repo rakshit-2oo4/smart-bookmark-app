@@ -4,7 +4,7 @@ A real-time bookmark manager built with Next.js App Router, Supabase, and Tailwi
 
 ## Live Demo
 
-> Add your Vercel URL here after deployment
+https://smart-bookmark-app-psi-five.vercel.app/
 
 ## Features
 

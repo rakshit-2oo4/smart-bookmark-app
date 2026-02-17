@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import BookmarkCard from './BookmarkCard'
 import AddBookmarkForm from './AddBookmarkForm'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 
 interface User {
   id: string
@@ -34,66 +35,46 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const [searchQuery, setSearchQuery] = useState('')
   const router = useRouter()
 
- useEffect(() => {
-  const supabase = createClient()
+  // Keep a single shared channel ref so send() uses the same instance as subscribe()
+  const channelRef = useRef<RealtimeChannel | null>(null)
 
-  const channel = supabase
-    .channel(`bookmarks-${user.id}`)
-    .on(
-      'postgres_changes',
-      {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'bookmarks',
-      },
-      async (payload) => {
-        console.log('[Realtime] INSERT received:', payload.new)
-        // If payload.new is empty, re-fetch from DB
-        if (!payload.new || !payload.new.id) {
-          const { data } = await supabase
-            .from('bookmarks')
-            .select('*')
-            .eq('user_id', user.id)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single()
-          if (data) {
-            setBookmarks((prev) => {
-              if (prev.some((b) => b.id === data.id)) return prev
-              return [data, ...prev]
-            })
-          }
-          return
-        }
-        const newBookmark = payload.new as Bookmark
+  useEffect(() => {
+    const supabase = createClient()
+    const channelName = `user-bookmarks-${user.id}`
+
+    const channel = supabase.channel(channelName)
+
+    channel
+      .on('broadcast', { event: 'bookmark-added' }, (payload) => {
+        console.log('[Broadcast] bookmark-added received:', payload)
+        const newBookmark = payload.payload as Bookmark
         setBookmarks((prev) => {
           if (prev.some((b) => b.id === newBookmark.id)) return prev
           return [newBookmark, ...prev]
         })
-      }
-    )
-    .on(
-      'postgres_changes',
-      {
-        event: 'DELETE',
-        schema: 'public',
-        table: 'bookmarks',
-      },
-      (payload) => {
-        console.log('[Realtime] DELETE received:', payload.old)
-        const deleted = payload.old as { id: string }
-        setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
-      }
-    )
-    .subscribe((status, err) => {
-      console.log('[Realtime] Status:', status, err ?? '')
-      setIsConnected(status === 'SUBSCRIBED')
-    })
+      })
+      .on('broadcast', { event: 'bookmark-deleted' }, (payload) => {
+        console.log('[Broadcast] bookmark-deleted received:', payload)
+        const { id } = payload.payload as { id: string }
+        setBookmarks((prev) => prev.filter((b) => b.id !== id))
+      })
+      .subscribe((status) => {
+        console.log('[Broadcast] Status:', status)
+        if (status === 'SUBSCRIBED') {
+          setIsConnected(true)
+          // Store the channel ref AFTER it is subscribed
+          channelRef.current = channel
+          console.log('[Broadcast] Channel ready and stored in ref')
+        } else {
+          setIsConnected(false)
+        }
+      })
 
-  return () => {
-    supabase.removeChannel(channel)
-  }
-}, [user.id])
+    return () => {
+      channelRef.current = null
+      supabase.removeChannel(channel)
+    }
+  }, [user.id])
 
   const handleSignOut = async () => {
     const supabase = createClient()
@@ -105,6 +86,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const handleDelete = async (id: string) => {
     const supabase = createClient()
     setDeletingId(id)
+
     const { error } = await supabase
       .from('bookmarks')
       .delete()
@@ -113,18 +95,53 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
 
     if (error) {
       console.error('Delete error:', error)
+      setDeletingId(null)
+      return
     }
+
+    // Remove locally
+    setBookmarks((prev) => prev.filter((b) => b.id !== id))
     setDeletingId(null)
+
+    // Broadcast to other tabs using the shared channel ref
+    if (channelRef.current) {
+      console.log('[Broadcast] Sending bookmark-deleted:', id)
+      await channelRef.current.send({
+        type: 'broadcast',
+        event: 'bookmark-deleted',
+        payload: { id },
+      })
+    } else {
+      console.warn('[Broadcast] Channel not ready for delete broadcast')
+    }
   }
 
-  const handleAddBookmark = useCallback((bookmark: Bookmark) => {
-    console.log('[Form] handleAddBookmark called with:', bookmark.id)
-    setBookmarks((prev) => {
-      if (prev.some((b) => b.id === bookmark.id)) return prev
-      return [bookmark, ...prev]
-    })
-    setShowForm(false)
-  }, [])
+  const handleAddBookmark = useCallback(
+    async (bookmark: Bookmark) => {
+      console.log('[Form] handleAddBookmark called:', bookmark.id)
+
+      // Add locally immediately
+      setBookmarks((prev) => {
+        if (prev.some((b) => b.id === bookmark.id)) return prev
+        return [bookmark, ...prev]
+      })
+      setShowForm(false)
+
+      // Broadcast to other tabs using the shared channel ref
+      if (channelRef.current) {
+        console.log('[Broadcast] Sending bookmark-added:', bookmark.id)
+        const result = await channelRef.current.send({
+          type: 'broadcast',
+          event: 'bookmark-added',
+          payload: bookmark,
+        })
+        console.log('[Broadcast] Send result:', result)
+      } else {
+        console.warn('[Broadcast] Channel not ready — ref is null')
+      }
+    },
+    [user.id]
+  )
 
   const filteredBookmarks = bookmarks.filter(
     (b) =>
@@ -147,7 +164,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
         }}
       >
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
-          {/* Brand */}
           <div className="flex items-center gap-2">
             <div
               className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -164,7 +180,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
               Markd
             </span>
 
-            {/* Realtime status */}
             <div
               className="ml-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs"
               style={{
@@ -183,15 +198,10 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
             </div>
           </div>
 
-          {/* User area */}
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-2">
               {user.avatar ? (
-                <img
-                  src={user.avatar}
-                  alt={user.name}
-                  className="w-7 h-7 rounded-full"
-                />
+                <img src={user.avatar} alt={user.name} className="w-7 h-7 rounded-full" />
               ) : (
                 <div
                   className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium text-white"
@@ -228,9 +238,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
         </div>
       </header>
 
-      {/* Main content */}
       <main className="max-w-3xl mx-auto px-4 py-8">
-        {/* Page title + stats */}
         <div className="mb-8 animate-fade-in-up" style={{ animationDelay: '0.05s', opacity: 0 }}>
           <h1
             className="text-3xl mb-1"
@@ -245,7 +253,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </p>
         </div>
 
-        {/* Search + Add bar */}
         <div
           className="flex gap-3 mb-6 animate-fade-in-up"
           style={{ animationDelay: '0.1s', opacity: 0 }}
@@ -260,7 +267,12 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
               style={{ color: 'var(--color-muted)' }}
             >
               <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="2" />
-              <path d="m21 21-4.35-4.35" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <path
+                d="m21 21-4.35-4.35"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
             </svg>
             <input
               type="text"
@@ -281,13 +293,17 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm btn-primary whitespace-nowrap"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M12 5v14M5 12h14" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+              <path
+                d="M12 5v14M5 12h14"
+                stroke="white"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+              />
             </svg>
             Add Bookmark
           </button>
         </div>
 
-        {/* Add form (slide in/out) */}
         {showForm && (
           <div className="mb-6 animate-slide-down">
             <AddBookmarkForm
@@ -298,7 +314,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </div>
         )}
 
-        {/* Bookmarks list */}
         {filteredBookmarks.length === 0 ? (
           <div
             className="text-center py-20 animate-fade-in"
@@ -315,7 +330,10 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
             ) : (
               <>
                 <div className="text-5xl mb-4">📑</div>
-                <p className="text-lg font-medium mb-2" style={{ color: 'var(--color-ink)', fontFamily: 'var(--font-display)' }}>
+                <p
+                  className="text-lg font-medium mb-2"
+                  style={{ color: 'var(--color-ink)', fontFamily: 'var(--font-display)' }}
+                >
                   Nothing saved yet
                 </p>
                 <p className="text-sm">

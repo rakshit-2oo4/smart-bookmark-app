@@ -35,46 +35,42 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
   const router = useRouter()
   const supabase = createClient()
 
-  // Set up real-time subscription
   useEffect(() => {
     const channel = supabase
-      .channel('bookmarks-realtime')
+      .channel(`bookmarks-${user.id}`)
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event: '*',
           schema: 'public',
           table: 'bookmarks',
-          filter: `user_id=eq.${user.id}`,
         },
         (payload) => {
-          setBookmarks((prev) => {
-            // Avoid duplicates
-            if (prev.some((b) => b.id === payload.new.id)) return prev
-            return [payload.new as Bookmark, ...prev]
-          })
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'bookmarks',
-          filter: `user_id=eq.${user.id}`,
-        },
-        (payload) => {
-          setBookmarks((prev) => prev.filter((b) => b.id !== payload.old.id))
+          if (payload.eventType === 'INSERT') {
+            const newBookmark = payload.new as Bookmark
+    
+            if (newBookmark.user_id !== user.id) return
+            setBookmarks((prev) => {
+              if (prev.some((b) => b.id === newBookmark.id)) return prev
+              return [newBookmark, ...prev]
+            })
+          }
+
+          if (payload.eventType === 'DELETE') {
+            const deleted = payload.old as { id: string }
+            setBookmarks((prev) => prev.filter((b) => b.id !== deleted.id))
+          }
         }
       )
       .subscribe((status) => {
+        console.log('Realtime status:', status)
         setIsConnected(status === 'SUBSCRIBED')
       })
 
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [user.id, supabase])
+  }, [user.id])
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
@@ -206,7 +202,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
         </div>
       </header>
 
-      {/* Main content */}
       <main className="max-w-3xl mx-auto px-4 py-8">
         {/* Page title + stats */}
         <div className="mb-8 animate-fade-in-up" style={{ animationDelay: '0.05s', opacity: 0 }}>
@@ -223,7 +218,7 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </p>
         </div>
 
-        {/* Search + Add bar */}
+
         <div
           className="flex gap-3 mb-6 animate-fade-in-up"
           style={{ animationDelay: '0.1s', opacity: 0 }}
@@ -265,7 +260,6 @@ export default function BookmarkDashboard({ user, initialBookmarks }: Props) {
           </button>
         </div>
 
-        {/* Add form (slide in/out) */}
         {showForm && (
           <div className="mb-6 animate-slide-down">
             <AddBookmarkForm
